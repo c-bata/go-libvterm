@@ -18,6 +18,7 @@ int _go_handle_bell(void*);
 int _go_handle_resize(int, int, void*);
 int _go_handle_moverect(VTermRect, VTermRect, void*);
 int _go_handle_movecursor(VTermPos, VTermPos, int, void*);
+void _go_handle_output(char *bytes, size_t len, void *user);
 
 static VTermScreenCallbacks _screen_callbacks = {
   _go_handle_damage,
@@ -33,6 +34,16 @@ static VTermScreenCallbacks _screen_callbacks = {
 static void
 _vterm_screen_set_callbacks(VTermScreen *screen, void *user) {
   vterm_screen_set_callbacks(screen, &_screen_callbacks, user);
+}
+
+static void
+_output_callback_wrapper(const char *bytes, size_t len, void *user) {
+  _go_handle_output((char *)bytes, len, user);
+}
+
+static void
+_vterm_set_output_callback(VTerm *vt, void *user) {
+  vterm_output_set_callback(vt, &_output_callback_wrapper, user);
 }
 */
 import "C"
@@ -60,8 +71,10 @@ const (
 )
 
 type VTerm struct {
-	term   *C.VTerm
-	screen *Screen
+	term          *C.VTerm
+	screen        *Screen
+	outputFunc    func([]byte)
+	outputUserPtr unsafe.Pointer
 }
 
 type Pos struct {
@@ -225,6 +238,20 @@ func (vt *VTerm) ObtainScreen() *Screen {
 	return vt.screen
 }
 
+func (vt *VTerm) SetOutputCallback(f func([]byte)) {
+	vt.outputFunc = f
+	if f != nil {
+		vt.outputUserPtr = pointer.Save(vt)
+		C._vterm_set_output_callback(vt.term, vt.outputUserPtr)
+	} else {
+		C._vterm_set_output_callback(vt.term, nil)
+		if vt.outputUserPtr != nil {
+			pointer.Unref(vt.outputUserPtr)
+			vt.outputUserPtr = nil
+		}
+	}
+}
+
 func (vt *VTerm) UTF8() bool {
 	return C.vterm_get_utf8(vt.term) != C.int(0)
 }
@@ -303,6 +330,25 @@ func (scr *Screen) IsEOL(pos *Pos) bool {
 
 type State struct {
 	state *C.VTermState
+}
+
+func (s *State) GetCursorPos() (row, col int) {
+	var pos C.VTermPos
+	C.vterm_state_get_cursorpos(s.state, &pos)
+	return int(pos.row), int(pos.col)
+}
+
+//export _go_handle_output
+func _go_handle_output(bytes *C.char, len C.size_t, user unsafe.Pointer) {
+	if user == nil {
+		return
+	}
+	vt := pointer.Restore(user).(*VTerm)
+	if vt.outputFunc != nil {
+		// Convert C bytes to Go slice
+		b := C.GoBytes(unsafe.Pointer(bytes), C.int(len))
+		vt.outputFunc(b)
+	}
 }
 
 //export _go_handle_damage
